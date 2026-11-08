@@ -92,14 +92,14 @@ How some inputs are read:
 
 ## How long it takes
 
-The site returns at most 100 releases per page, and its server is slow for date-range queries.
-A single page can take around 20 seconds. Figures measured in November 2026:
+The site returns at most 100 releases per page, so the time depends mostly on how many releases
+are in the range. Figures measured in November 2026, including starting Chrome:
 
-| Range | Releases | Pages |
-|---|---|---|
-| 8–10 November 2026 | 11 | 1 |
-| Everything from today on | ~440 | 5 |
-| 1 November 2025 – 31 December 2026 | ~34,000 | ~340 (1–2 hours) |
+| Range | Releases | Pages | Time |
+|---|---|---|---|
+| 8–10 November 2026 | 11 | 1 | a few seconds |
+| 15 December 2025 – 10 February 2026 | 5,574 | 56 | ~30 seconds |
+| 1 November 2025 – 31 December 2026 | ~34,000 | ~340 | ~3 minutes (estimated) |
 
 Ranges that reach into the past are much bigger, because they contain everything already released.
 Progress is printed after every page.
@@ -133,8 +133,15 @@ Two behaviours of the site affect how the scraper works:
 - **Scripts load late.** The site loads its JavaScript through Cloudflare Rocket Loader. Until that
   finishes, the filters do nothing, so the scraper waits for it before touching the page.
 - **One reload, not six.** Every date dropdown reloads the table when it changes. Setting the six dropdowns one by
-  one would send six slow requests at once, and the server throttles that. The scraper sets all six
+  one would send six requests at once, and the server throttles that. The scraper sets all six
   and reloads the table once.
+- **One month at a time.** The server needs about 20 seconds per page when the range spans many
+  months, but under a second when it spans one month. Which page you ask for makes no difference.
+  So the scraper splits the range into calendar months and goes through them in order. Each month starts at
+  day `00` (and January at month `00`), because that is how the site stores releases dated only
+  "November 2026" or "2026". With that, the months add up to exactly the same releases as the whole range.
+- **Whole pages at once.** Each results page is read with a single browser call instead of one call
+  per cell.
 
 Please be considerate: every page is a request to a community-run site. Prefer shorter date ranges
 and don't run many scrapes in parallel.

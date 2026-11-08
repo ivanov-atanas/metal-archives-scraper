@@ -4,7 +4,6 @@ import bg.qa.model.Release;
 import org.openqa.selenium.By;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.NoSuchElementException;
-import org.openqa.selenium.StaleElementReferenceException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.support.FindBy;
@@ -15,10 +14,13 @@ import org.openqa.selenium.support.ui.WebDriverWait;
 
 import java.time.Duration;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public class UpcomingAlbumsPage {
 
@@ -31,9 +33,23 @@ public class UpcomingAlbumsPage {
                             "[normalize-space()='Next' or @aria-label='Next'])[last()]"
             );
 
+    private static final String READ_ROWS_SCRIPT =
+            "return Array.from(document.querySelectorAll('#upcomingAlbumList tbody tr'))" +
+                    ".filter(tr => tr.cells.length >= 6)" +
+                    ".map(tr => Array.from(tr.cells).slice(0, 6).map(td => td.innerText.trim()));";
+
+    private static final String TABLE_HAS_RESULTS_SCRIPT =
+            "var rows = document.querySelectorAll('#upcomingAlbumList tbody tr');" +
+                    "if (rows.length === 0) { return false; }" +
+                    "return rows[0].cells.length >= 6" +
+                    " || rows[0].querySelector('.dataTables_empty') !== null;";
+
     private final WebDriver driver;
     private final WebDriverWait wait;
     private final WebDriverWait tableWait;
+
+    private List<DateFilter> monthlyFilters = List.of();
+    private DateFilter appliedFilter;
 
     @FindBy(xpath = "//h1[normalize-space()='Upcoming albums']")
     private WebElement pageHeading;
@@ -44,26 +60,27 @@ public class UpcomingAlbumsPage {
     @FindBy(id = "fromDateDay")
     private WebElement fromDaySelect;
 
-    @FindBy(id = "fromDateMonth")
-    private WebElement fromMonthSelect;
-
-    @FindBy(id = "fromDateYear")
-    private WebElement fromYearSelect;
-
-    @FindBy(id = "toDateDay")
-    private WebElement toDaySelect;
-
-    @FindBy(id = "toDateMonth")
-    private WebElement toMonthSelect;
-
-    @FindBy(id = "toDateYear")
-    private WebElement toYearSelect;
-
     @FindBy(id = "chkVersions")
     private WebElement includeReleasedVersionsCheckbox;
 
-    @FindBy(css = "#upcomingAlbumList tbody tr")
-    private List<WebElement> releaseRows;
+    @FindBy(id = "upcomingAlbumList_info")
+    private WebElement tableInfo;
+
+    /*
+     * The values the site's date dropdowns are set to. An empty day or
+     * month is sent to the server as "00", which is how the site stores
+     * releases with an unknown day ("November 2026") or month ("2026").
+     */
+    private record DateFilter(
+            String label,
+            String fromYear,
+            String fromMonth,
+            String fromDay,
+            String toYear,
+            String toMonth,
+            String toDay
+    ) {
+    }
 
     public UpcomingAlbumsPage(WebDriver driver) {
         this.driver = driver;
@@ -102,7 +119,7 @@ public class UpcomingAlbumsPage {
      */
     private void waitForPageScripts() {
         wait.until(driver ->
-                (Boolean) ((JavascriptExecutor) driver).executeScript(
+                (Boolean) js().executeScript(
                         "return document.readyState === 'complete'" +
                                 " && typeof window.jQuery === 'function'" +
                                 " && typeof window.refreshTable === 'function'" +
@@ -114,12 +131,11 @@ public class UpcomingAlbumsPage {
 
     /*
      * Waits until the DataTables reload has finished: no AJAX request
-     * in flight and the "Processing..." indicator hidden. Range queries
-     * can take 20+ seconds on the server, hence the long timeout.
+     * in flight and the "Processing..." indicator hidden.
      */
     private void waitForTableLoad() {
         tableWait.until(driver ->
-                (Boolean) ((JavascriptExecutor) driver).executeScript(
+                (Boolean) js().executeScript(
                         "var p = document.getElementById('upcomingAlbumList_processing');" +
                                 "return window.jQuery.active === 0" +
                                 " && (!p || getComputedStyle(p).visibility === 'hidden');"
@@ -127,6 +143,16 @@ public class UpcomingAlbumsPage {
         );
     }
 
+    /**
+     * Chooses the date range to scrape.
+     *
+     * <p>The server answers a query over a long range in about 20 seconds
+     * per page, but a one-month query in under a second, and the speed
+     * does not depend on which page is asked for. So the range is split
+     * into calendar months, which {@link #getAllReleases()} walks through
+     * one after another. Together the months cover exactly the same
+     * releases as the whole range. Afterwards the table shows the first month.
+     */
     public void setDateRange(
             LocalDate startDate,
             LocalDate endDate
@@ -145,12 +171,73 @@ public class UpcomingAlbumsPage {
                 ExpectedConditions.visibilityOf(fromDaySelect)
         );
 
-        /*
-         * Every date dropdown has a change handler that reloads the table.
-         * Picking the six values one by one fires six slow requests at once,
-         * which the server throttles. Set them all, then reload once.
-         */
-        Boolean allValuesSet = (Boolean) ((JavascriptExecutor) driver).executeScript(
+        monthlyFilters =
+                splitIntoMonths(
+                        startDate,
+                        endDate
+                );
+
+        applyFilter(
+                monthlyFilters.get(0)
+        );
+    }
+
+    private static List<DateFilter> splitIntoMonths(
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        List<DateFilter> filters =
+                new ArrayList<>();
+
+        YearMonth firstMonth = YearMonth.from(startDate);
+        YearMonth lastMonth = YearMonth.from(endDate);
+
+        for (YearMonth month = firstMonth; !month.isAfter(lastMonth); month = month.plusMonths(1)) {
+
+            String year = String.valueOf(month.getYear());
+            String fromMonth;
+            String fromDay;
+
+            if (month.equals(firstMonth)) {
+                fromMonth = pad(startDate.getMonthValue());
+                fromDay = pad(startDate.getDayOfMonth());
+            } else if (month.getMonthValue() == 1) {
+                // "2026-00-00": also releases dated only by year, which sort before January
+                fromMonth = "";
+                fromDay = "";
+            } else {
+                // "2026-03-00": also releases dated only by month
+                fromMonth = pad(month.getMonthValue());
+                fromDay = "";
+            }
+
+            boolean isLast = month.equals(lastMonth);
+
+            filters.add(
+                    new DateFilter(
+                            month.toString(),
+                            year,
+                            fromMonth,
+                            fromDay,
+                            String.valueOf(isLast ? endDate.getYear() : month.getYear()),
+                            pad(isLast ? endDate.getMonthValue() : month.getMonthValue()),
+                            isLast ? pad(endDate.getDayOfMonth()) : "31"
+                    )
+            );
+        }
+
+        return filters;
+    }
+
+    /*
+     * Every date dropdown has a change handler that reloads the table.
+     * Picking the six values one by one fires six requests at once,
+     * which the server throttles. Set them all, then reload once.
+     */
+    private void applyFilter(
+            DateFilter filter
+    ) {
+        Boolean allValuesSet = (Boolean) js().executeScript(
                 "var values = arguments[0];" +
                         "for (var id in values) {" +
                         "  $('#' + id).val(values[id]);" +
@@ -159,21 +246,24 @@ public class UpcomingAlbumsPage {
                         "refreshTable();" +
                         "return true;",
                 Map.of(
-                        "fromDateDay", String.format("%02d", startDate.getDayOfMonth()),
-                        "fromDateMonth", String.format("%02d", startDate.getMonthValue()),
-                        "fromDateYear", String.valueOf(startDate.getYear()),
-                        "toDateDay", String.format("%02d", endDate.getDayOfMonth()),
-                        "toDateMonth", String.format("%02d", endDate.getMonthValue()),
-                        "toDateYear", String.valueOf(endDate.getYear())
+                        "fromDateYear", filter.fromYear(),
+                        "fromDateMonth", filter.fromMonth(),
+                        "fromDateDay", filter.fromDay(),
+                        "toDateYear", filter.toYear(),
+                        "toDateMonth", filter.toMonth(),
+                        "toDateDay", filter.toDay()
                 )
         );
 
         if (!Boolean.TRUE.equals(allValuesSet)) {
             throw new IllegalArgumentException(
-                    "The site does not offer the date range " +
-                            startDate + " - " + endDate
+                    "The site does not offer dates in " +
+                            filter.label() +
+                            " (its year lists only go from 1976 to the current year)"
             );
         }
+
+        appliedFilter = filter;
 
         waitForTableLoad();
         waitForResults();
@@ -199,105 +289,89 @@ public class UpcomingAlbumsPage {
 
     public List<Release> getAllReleases() {
 
-        List<Release> allReleases =
-                new ArrayList<>();
-
-        int pageNumber = 1;
-
-        while (true) {
-
-            List<Release> currentPageReleases =
-                    getCurrentPageReleases();
-
-            allReleases.addAll(
-                    currentPageReleases
+        if (monthlyFilters.isEmpty()) {
+            throw new IllegalStateException(
+                    "Call setDateRange before getAllReleases"
             );
-
-            System.out.println(
-                    "Page " +
-                            pageNumber +
-                            ": " +
-                            currentPageReleases.size() +
-                            " releases collected"
-            );
-
-            System.out.println(
-                    "Total collected: " +
-                            allReleases.size()
-            );
-
-            if (!hasNextPage()) {
-                break;
-            }
-
-            goToNextPage();
-
-            pageNumber++;
         }
 
-        return allReleases;
+        // a set guards against a release showing up twice when the site's data changes mid-run
+        Set<Release> allReleases =
+                new LinkedHashSet<>();
+
+        for (DateFilter filter : monthlyFilters) {
+
+            if (!filter.equals(appliedFilter)) {
+                applyFilter(filter);
+            }
+
+            int pageNumber = 1;
+            int monthCount = 0;
+
+            while (true) {
+
+                List<Release> currentPageReleases =
+                        getCurrentPageReleases();
+
+                allReleases.addAll(
+                        currentPageReleases
+                );
+
+                monthCount += currentPageReleases.size();
+
+                System.out.println(
+                        filter.label() +
+                                ", page " +
+                                pageNumber +
+                                ": " +
+                                currentPageReleases.size() +
+                                " releases (month: " +
+                                monthCount +
+                                ", total: " +
+                                allReleases.size() +
+                                ")"
+                );
+
+                if (!hasNextPage()) {
+                    break;
+                }
+
+                goToNextPage();
+
+                pageNumber++;
+            }
+        }
+
+        return new ArrayList<>(allReleases);
     }
 
+    /*
+     * Reads the whole table in a single browser call. Asking for each
+     * cell separately costs 600 round trips per page of 100 rows.
+     */
+    @SuppressWarnings("unchecked")
     public List<Release> getCurrentPageReleases() {
 
         waitForResults();
 
+        List<List<String>> rows =
+                (List<List<String>>) js().executeScript(
+                        READ_ROWS_SCRIPT
+                );
+
         List<Release> releases =
                 new ArrayList<>();
 
-        for (WebElement row : releaseRows) {
-
-            List<WebElement> cells =
-                    row.findElements(
-                            By.tagName("td")
-                    );
-
-            if (cells.size() < 6) {
-                continue;
-            }
-
-            String band =
-                    cells.get(0)
-                            .getText()
-                            .trim();
-
-            String album =
-                    cells.get(1)
-                            .getText()
-                            .trim();
-
-            String type =
-                    cells.get(2)
-                            .getText()
-                            .trim();
-
-            String genre =
-                    cells.get(3)
-                            .getText()
-                            .trim();
-
-            String releaseDate =
-                    cells.get(4)
-                            .getText()
-                            .trim();
-
-            String addedDate =
-                    cells.get(5)
-                            .getText()
-                            .trim();
-
-            Release release =
-                    new Release(
-                            band,
-                            album,
-                            type,
-                            genre,
-                            releaseDate,
-                            addedDate
-                    );
-
+        for (List<String> cells : rows) {
             releases.add(
-                    release
+                    new Release(
+                            cells.get(0),
+                            cells.get(1),
+                            cells.get(2),
+                            cells.get(3),
+                            cells.get(4),
+                            cells.get(5)
+                    )
             );
         }
 
@@ -330,17 +404,9 @@ public class UpcomingAlbumsPage {
                                 "aria-disabled"
                         );
 
-        if (classAttribute != null) {
-
-            String classes =
-                    classAttribute
-                            .toLowerCase(
-                                    Locale.ROOT
-                            );
-
-            if (classes.contains("disabled")) {
-                return false;
-            }
+        if (classAttribute != null
+                && classAttribute.toLowerCase(Locale.ROOT).contains("disabled")) {
+            return false;
         }
 
         return !"true".equalsIgnoreCase(
@@ -350,15 +416,8 @@ public class UpcomingAlbumsPage {
 
     private void goToNextPage() {
 
-        waitForResults();
-
-        WebElement oldFirstRow =
-                releaseRows.get(0);
-
-        String oldFirstRowText =
-                oldFirstRow
-                        .getText()
-                        .trim();
+        String oldInfo =
+                tableInfo.getText();
 
         List<WebElement> nextButtons =
                 driver.findElements(
@@ -371,75 +430,38 @@ public class UpcomingAlbumsPage {
             );
         }
 
-        WebElement nextButton =
-                nextButtons.get(
-                        nextButtons.size() - 1
-                );
+        nextButtons.get(
+                nextButtons.size() - 1
+        ).click();
 
-        wait.until(
-                ExpectedConditions.elementToBeClickable(
-                        nextButton
-                )
+        // "Showing 1 to 100 of 3,059 entries" -> "Showing 101 to 200 ..."
+        tableWait.until(driver ->
+                !tableInfo.getText().equals(oldInfo)
         );
-
-        nextButton.click();
-
-        // each page is a separate server request that can take 20+ seconds
-        tableWait.until(driver -> {
-
-            try {
-
-                if (releaseRows.isEmpty()) {
-                    return false;
-                }
-
-                String newFirstRowText =
-                        releaseRows
-                                .get(0)
-                                .getText()
-                                .trim();
-
-                return !newFirstRowText.equals(
-                        oldFirstRowText
-                );
-
-            } catch (
-                    StaleElementReferenceException e
-            ) {
-
-                return true;
-            }
-        });
 
         waitForTableLoad();
         waitForResults();
     }
 
+    /*
+     * The table has loaded either release rows or DataTables'
+     * "No data available" row (a month without releases).
+     */
     private void waitForResults() {
+        wait.until(driver ->
+                (Boolean) js().executeScript(
+                        TABLE_HAS_RESULTS_SCRIPT
+                )
+        );
+    }
 
-        wait.until(driver -> {
+    private JavascriptExecutor js() {
+        return (JavascriptExecutor) driver;
+    }
 
-            try {
-
-                if (releaseRows.isEmpty()) {
-                    return false;
-                }
-
-                List<WebElement> cells =
-                        releaseRows
-                                .get(0)
-                                .findElements(
-                                        By.tagName("td")
-                                );
-
-                return cells.size() >= 6;
-
-            } catch (
-                    StaleElementReferenceException e
-            ) {
-
-                return false;
-            }
-        });
+    private static String pad(
+            int value
+    ) {
+        return String.format("%02d", value);
     }
 }
