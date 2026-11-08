@@ -198,10 +198,11 @@ public class UpcomingAlbumsPage {
             String fromMonth;
             String fromDay;
 
-            if (month.equals(firstMonth)) {
+            if (month.equals(firstMonth) && startDate.getDayOfMonth() != 1) {
                 fromMonth = pad(startDate.getMonthValue());
                 fromDay = pad(startDate.getDayOfMonth());
             } else if (month.getMonthValue() == 1) {
+                // a range from 1 January (or crossing into January) covers the whole year
                 // "2026-00-00": also releases dated only by year, which sort before January
                 fromMonth = "";
                 fromDay = "";

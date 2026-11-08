@@ -8,7 +8,7 @@ It drives a real Chrome browser with Selenium, using the Page Object pattern.
 
 ## What it does
 
-1. Asks which genre you are interested in and which dates to look at.
+1. Asks which genre you are interested in, whether you want only full-length albums, and which dates to look at.
 2. Opens the *Upcoming albums* page and sets the date range filter.
 3. Excludes new versions of albums that were already released.
 4. Goes through every result page and reads each release.
@@ -18,6 +18,7 @@ It drives a real Chrome browser with Selenium, using the Page Object pattern.
 |---|---|
 | `all-releases.csv` | every release in the date range |
 | `<genre>-releases.csv` | only releases whose genre contains your keyword, e.g. `power-releases.csv` |
+| `<genre>-albums.csv` | the same, but only full-length albums (written instead of the file above when you answer *y*) |
 
 Columns: `Band, Album, Type, Genre, Release date, Added date`. Files are UTF-8, and every value is quoted.
 
@@ -43,6 +44,7 @@ On Windows use `mvnw.cmd compile exec:java`. In IntelliJ IDEA, run the `main` me
 ```
 Genre (e.g. power metal): power metal
 Searching for genres containing: power
+Only full-length albums, no singles, EPs, live albums, compilations etc.? (y/N): y
 Start date (any format, e.g. 8.11.2026, Nov 8 2026, next month; Enter for 2026-11-08): today
   -> Sunday, 8 November 2026
 End date (any format, e.g. 8.11.2026, Nov 8 2026, next month; Enter for 2026-12-08): +2 days
@@ -66,6 +68,12 @@ on the site contains it, and the rest is matched as part of the genre name, igno
 | `power metal` | `power` | Power Metal, Heavy/Power Metal, Symphonic Power Metal |
 | `Black/Death Metal` | `black/death` | Black/Death Metal |
 | `metalcore` | `metalcore` | Metalcore, Deathcore/Metalcore |
+
+### Full-length albums only
+
+Answer `y` (or `yes`, `да`) to keep only releases of type **Full-length**, which means studio albums.
+That drops Single, EP, Demo, Split, Compilation, Live album, Collaboration, Boxed set and Video.
+Pressing Enter or answering `n` keeps every type. `all-releases.csv` is never filtered.
 
 ### Dates
 

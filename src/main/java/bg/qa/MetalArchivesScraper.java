@@ -22,6 +22,13 @@ public class MetalArchivesScraper {
                     Locale.ENGLISH
             );
 
+    /*
+     * Metal Archives' type for a studio album. The other types are
+     * Single, EP, Demo, Split, Compilation, Live album, Collaboration,
+     * Boxed set, Video and Split video.
+     */
+    private static final String FULL_LENGTH = "Full-length";
+
     private static final Path OUTPUT_DIRECTORY =
             Path.of("output");
 
@@ -32,6 +39,12 @@ public class MetalArchivesScraper {
 
         String genreKeyword =
                 askGenreKeyword(scanner);
+
+        boolean onlyAlbums =
+                askYesNo(
+                        scanner,
+                        "Only full-length albums, no singles, EPs, live albums, compilations etc.? (y/N): "
+                );
 
         LocalDate startDate =
                 askDate(
@@ -76,6 +89,13 @@ public class MetalArchivesScraper {
                             genreKeyword
                     );
 
+            if (onlyAlbums) {
+                matchingReleases =
+                        filterFullLengthAlbums(
+                                matchingReleases
+                        );
+            }
+
             Path allReleasesFile =
                     OUTPUT_DIRECTORY.resolve(
                             "all-releases.csv"
@@ -84,7 +104,8 @@ public class MetalArchivesScraper {
             Path matchingReleasesFile =
                     OUTPUT_DIRECTORY.resolve(
                             createGenreFileName(
-                                    genreKeyword
+                                    genreKeyword,
+                                    onlyAlbums
                             )
                     );
 
@@ -119,6 +140,11 @@ public class MetalArchivesScraper {
             System.out.println(
                     "Genre keyword: " +
                             genreKeyword
+            );
+
+            System.out.println(
+                    "Release types: " +
+                            (onlyAlbums ? "full-length albums only" : "all")
             );
 
             System.out.println(
@@ -277,8 +303,46 @@ public class MetalArchivesScraper {
                 .toList();
     }
 
+    private static boolean askYesNo(
+            Scanner scanner,
+            String question
+    ) {
+        while (true) {
+            System.out.print(question);
+
+            String answer =
+                    scanner.nextLine()
+                            .trim()
+                            .toLowerCase(Locale.ROOT);
+
+            switch (answer) {
+                case "y", "yes", "д", "да":
+                    return true;
+                case "", "n", "no", "н", "не":
+                    return false;
+                default:
+                    System.out.println(
+                            "  Please answer y or n."
+                    );
+            }
+        }
+    }
+
+    private static List<Release> filterFullLengthAlbums(
+            List<Release> releases
+    ) {
+        return releases.stream()
+                .filter(release ->
+                        FULL_LENGTH.equalsIgnoreCase(
+                                release.getType()
+                        )
+                )
+                .toList();
+    }
+
     private static String createGenreFileName(
-            String genreKeyword
+            String genreKeyword,
+            boolean onlyAlbums
     ) {
         String safeGenreName =
                 genreKeyword
@@ -296,6 +360,6 @@ public class MetalArchivesScraper {
                         );
 
         return safeGenreName +
-                "-releases.csv";
+                (onlyAlbums ? "-albums.csv" : "-releases.csv");
     }
 }
